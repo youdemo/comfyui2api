@@ -17,6 +17,11 @@ class ComfyWorkflowSanitizationTests(unittest.TestCase):
     def test_prepare_prompt_follows_positive_text_source_chain(self) -> None:
         workflow = {
             "prompt": {
+                "298": {
+                    "class_type": "ComfyMathExpression",
+                    "inputs": {"expression": "a", "values.a": ["300", 0]},
+                    "_meta": {"title": "Math Expression"},
+                },
                 "304": {
                     "class_type": "CLIPTextEncode",
                     "inputs": {"text": ["325", 0], "clip": ["278", 0]},
@@ -24,8 +29,13 @@ class ComfyWorkflowSanitizationTests(unittest.TestCase):
                 },
                 "305": {
                     "class_type": "LTXVConditioning",
-                    "inputs": {"positive": ["304", 0], "negative": ["315", 0]},
+                    "inputs": {"frame_rate": ["298", 0], "positive": ["304", 0], "negative": ["315", 0]},
                     "_meta": {"title": "LTXV条件"},
+                },
+                "316": {
+                    "class_type": "CFGGuider",
+                    "inputs": {"positive": ["305", 0], "negative": ["305", 1]},
+                    "_meta": {"title": "CFG引导器"},
                 },
                 "315": {
                     "class_type": "CLIPTextEncode",

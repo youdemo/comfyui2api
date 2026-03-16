@@ -130,7 +130,7 @@ def find_text_prompt_targets(
         if item not in generic:
             generic.append(item)
 
-    def resolve_text_target(start_node_id: str) -> Optional[Tuple[str, str, str, str]]:
+    def resolve_text_target(start_node_id: str, *, kind: str) -> Optional[Tuple[str, str, str, str]]:
         current_id = start_node_id
         seen: set[str] = set()
         while current_id and current_id not in seen:
@@ -144,12 +144,10 @@ def find_text_prompt_targets(
             if not isinstance(inputs, dict):
                 return None
 
-            preferred_keys = []
-            for key in ("text", "value"):
-                if key in inputs and isinstance(key, str):
-                    preferred_keys.append(key)
-            for key in inputs.keys():
-                if isinstance(key, str) and key not in preferred_keys:
+            preferred_keys: List[str] = []
+            # Follow semantically relevant links only; avoid unrelated inputs like frame_rate/expression.
+            for key in (kind, "text", "value", "prompt", "string"):
+                if key in inputs:
                     preferred_keys.append(key)
 
             next_node_id: Optional[str] = None
@@ -205,7 +203,7 @@ def find_text_prompt_targets(
             if not (isinstance(v, list) and len(v) >= 1 and isinstance(v[0], str)):
                 continue
             ref_id = v[0]
-            resolved = resolve_text_target(ref_id)
+            resolved = resolve_text_target(ref_id, kind=key)
             if not resolved:
                 continue
             node_id, input_key, cls, title = resolved
