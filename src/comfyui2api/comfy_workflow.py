@@ -114,6 +114,7 @@ def find_text_prompt_targets(
 ) -> Tuple[List[Tuple[str, str, str, str]], List[Tuple[str, str, str, str]]]:
     pos: List[Tuple[str, str, str, str]] = []
     neg: List[Tuple[str, str, str, str]] = []
+    generic: List[Tuple[str, str, str, str]] = []
 
     def add(kind: str, node_id: str, input_key: str, cls: str, title: str) -> None:
         item = (node_id, input_key, cls, title)
@@ -123,6 +124,46 @@ def find_text_prompt_targets(
         else:
             if item not in neg:
                 neg.append(item)
+
+    def add_generic(node_id: str, input_key: str, cls: str, title: str) -> None:
+        item = (node_id, input_key, cls, title)
+        if item not in generic:
+            generic.append(item)
+
+    def resolve_text_target(start_node_id: str) -> Optional[Tuple[str, str, str, str]]:
+        current_id = start_node_id
+        seen: set[str] = set()
+        while current_id and current_id not in seen:
+            seen.add(current_id)
+            node = prompt.get(current_id)
+            if not isinstance(node, dict):
+                return None
+            cls = as_str(node.get("class_type"))
+            title = get_node_title(node)
+            inputs = node.get("inputs")
+            if not isinstance(inputs, dict):
+                return None
+
+            preferred_keys = []
+            for key in ("text", "value"):
+                if key in inputs and isinstance(key, str):
+                    preferred_keys.append(key)
+            for key in inputs.keys():
+                if isinstance(key, str) and key not in preferred_keys:
+                    preferred_keys.append(key)
+
+            next_node_id: Optional[str] = None
+            for key in preferred_keys:
+                value = inputs.get(key)
+                if isinstance(value, str):
+                    return current_id, key, cls, title
+                if isinstance(value, list) and value and isinstance(value[0], str):
+                    next_node_id = value[0]
+                    break
+            if not next_node_id:
+                return None
+            current_id = next_node_id
+        return None
 
     for node_id, node in prompt.items():
         if not isinstance(node_id, str) or not isinstance(node, dict):
@@ -151,8 +192,7 @@ def find_text_prompt_targets(
             continue
 
         if is_encode:
-            add("pos", node_id, preferred_key, cls, title)
-            add("neg", node_id, preferred_key, cls, title)
+            add_generic(node_id, preferred_key, cls, title)
 
     for _, node in prompt.items():
         if not isinstance(node, dict):
@@ -165,19 +205,19 @@ def find_text_prompt_targets(
             if not (isinstance(v, list) and len(v) >= 1 and isinstance(v[0], str)):
                 continue
             ref_id = v[0]
-            ref = prompt.get(ref_id)
-            if not isinstance(ref, dict):
+            resolved = resolve_text_target(ref_id)
+            if not resolved:
                 continue
-            ref_inputs = ref.get("inputs")
-            if not isinstance(ref_inputs, dict):
-                continue
-            if "text" in ref_inputs and isinstance(ref_inputs.get("text"), str):
-                cls = as_str(ref.get("class_type"))
-                title = get_node_title(ref)
-                if key == "positive":
-                    add("pos", ref_id, "text", cls, title)
-                else:
-                    add("neg", ref_id, "text", cls, title)
+            node_id, input_key, cls, title = resolved
+            if key == "positive":
+                add("pos", node_id, input_key, cls, title)
+            else:
+                add("neg", node_id, input_key, cls, title)
+
+    if not pos:
+        pos.extend(generic)
+    if not neg:
+        neg.extend(generic)
 
     return pos, neg
 

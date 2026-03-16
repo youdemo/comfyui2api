@@ -14,6 +14,62 @@ from comfyui2api.comfy_workflow import normalize_prompt_enum_inputs, prepare_pro
 
 
 class ComfyWorkflowSanitizationTests(unittest.TestCase):
+    def test_prepare_prompt_follows_positive_text_source_chain(self) -> None:
+        workflow = {
+            "prompt": {
+                "304": {
+                    "class_type": "CLIPTextEncode",
+                    "inputs": {"text": ["325", 0], "clip": ["278", 0]},
+                    "_meta": {"title": "CLIP文本编码"},
+                },
+                "305": {
+                    "class_type": "LTXVConditioning",
+                    "inputs": {"positive": ["304", 0], "negative": ["315", 0]},
+                    "_meta": {"title": "LTXV条件"},
+                },
+                "315": {
+                    "class_type": "CLIPTextEncode",
+                    "inputs": {"text": "old negative", "clip": ["278", 0]},
+                    "_meta": {"title": "CLIP文本编码"},
+                },
+                "325": {
+                    "class_type": "PrimitiveStringMultiline",
+                    "inputs": {"value": "old positive"},
+                    "_meta": {"title": "Prompt"},
+                },
+            }
+        }
+
+        prompt, extra_data, applied, trace = prepare_prompt(
+            workflow_obj=workflow,
+            positive_prompt="new positive",
+            negative_prompt=None,
+            positive_prompt_node=None,
+            negative_prompt_node=None,
+            image=None,
+            image_node=None,
+            overrides=[],
+        )
+
+        self.assertIsNone(extra_data)
+        self.assertEqual(applied, [("325", "value", "new positive")])
+        self.assertEqual(prompt["325"]["inputs"]["value"], "new positive")
+        self.assertEqual(prompt["315"]["inputs"]["text"], "old negative")
+        self.assertEqual(
+            trace,
+            {
+                "positive": [
+                    {
+                        "node_id": "325",
+                        "input_key": "value",
+                        "class_type": "PrimitiveStringMultiline",
+                        "title": "Prompt",
+                        "value": "new positive",
+                    }
+                ]
+            },
+        )
+
     def test_prepare_prompt_reports_effective_prompt_targets(self) -> None:
         workflow = {
             "prompt": {
