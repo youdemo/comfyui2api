@@ -8,6 +8,7 @@ import re
 import socket
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
 from fastapi import (
@@ -82,20 +83,38 @@ def _uuid_now_hex() -> str:
     return uuid.uuid4().hex
 
 
-def _auth_value_from_ws(ws: WebSocket) -> str | None:
-    header_value = (ws.headers.get("authorization") or "").strip()
-    if header_value:
-        return header_value
-
+def _auth_value_from_query_params(query_params: Mapping[str, Any]) -> str | None:
     for key in ("authorization", "api_key", "token", "access_token"):
-        raw = (ws.query_params.get(key) or "").strip()
+        raw_value = query_params.get(key)
+        raw = str(raw_value or "").strip()
         if not raw:
             continue
         if key == "authorization" or raw.lower().startswith("bearer "):
             return raw
         return f"Bearer {raw}"
-
     return None
+
+
+def _auth_value_from_request(request: Request, authorization: str | None) -> str | None:
+    header_value = (authorization or "").strip()
+    if header_value:
+        return header_value
+    return _auth_value_from_query_params(request.query_params)
+
+
+def _bearer_token_from_auth_value(authorization: str | None) -> str | None:
+    raw = (authorization or "").strip()
+    if not raw.lower().startswith("bearer "):
+        return None
+    token = raw.split(" ", 1)[1].strip()
+    return token or None
+
+
+def _auth_value_from_ws(ws: WebSocket) -> str | None:
+    header_value = (ws.headers.get("authorization") or "").strip()
+    if header_value:
+        return header_value
+    return _auth_value_from_query_params(ws.query_params)
 
 
 class _RequestBodyTooLargeError(RuntimeError):
@@ -533,6 +552,21 @@ def create_app() -> FastAPI:
         if maybe_path.startswith("/"):
             return _base_url(request) + maybe_path
         return maybe_path
+
+    def _authorized_url(request: Request, maybe_path: str, authorization: str | None) -> str:
+        url = _abs_url(request, maybe_path)
+        if not url or not cfg.api_token:
+            return url
+
+        token = _bearer_token_from_auth_value(_auth_value_from_request(request, authorization))
+        if not token:
+            return url
+
+        parts = urlsplit(url)
+        params = parse_qsl(parts.query, keep_blank_values=True)
+        if not any(key in {"authorization", "api_key", "token", "access_token"} for key, _ in params):
+            params.append(("api_key", token))
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(params), parts.fragment))
 
     @app.get("/v1/models")
     async def openai_models(authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
@@ -1070,7 +1104,7 @@ def create_app() -> FastAPI:
 
         url = None
         if completed:
-            url = f"{_base_url(request)}/v1/videos/{video_id}/content"
+            url = _authorized_url(request, f"/v1/videos/{video_id}/content", authorization)
 
         err = None
         if status == "failed":
@@ -1093,10 +1127,11 @@ def create_app() -> FastAPI:
 
     @app.get("/v1/videos/{video_id}/content")
     async def openai_videos_content(
+        request: Request,
         video_id: str,
         authorization: Optional[str] = Header(default=None),
     ) -> Any:
-        _require_auth(cfg, authorization)
+        _require_auth(cfg, _auth_value_from_request(request, authorization))
         job_id = _as_job_id_from_video_id(video_id)
         job = await jobs.get_job(job_id)
         if not job:
@@ -1209,7 +1244,7 @@ def create_app() -> FastAPI:
         url = None
         fmt = None
         if status == "completed":
-            url = f"{_base_url(request)}/v1/videos/{_video_id(job.job_id)}/content"
+            url = _authorized_url(request, f"/v1/videos/{_video_id(job.job_id)}/content", authorization)
             for o in job.outputs or []:
                 fn = (o.filename or "")
                 if "." in fn:

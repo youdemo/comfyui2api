@@ -280,6 +280,82 @@ class AppSmokeTests(unittest.TestCase):
         kwargs = mock_create_job.await_args.kwargs
         self.assertEqual(kwargs["workflow"], self.hybrid_video_workflow_name)
 
+    def test_videos_get_returns_content_url_with_api_key_query(self) -> None:
+        from comfyui2api.jobs import Job, JobOutput
+
+        done = asyncio.Event()
+        done.set()
+        job = Job(
+            job_id="job-video-content",
+            created_at_utc="2026-03-16T00:00:00Z",
+            created_at=123,
+            status="completed",
+            kind="txt2video",
+            workflow=self.txt2video_workflow_name,
+            requested_model=self.txt2video_workflow_name,
+            outputs=[
+                JobOutput(
+                    filename="clip.mp4",
+                    url="/runs/job-video-content/clip.mp4",
+                    media_type="video/mp4",
+                    node_id="2",
+                    output_key="images",
+                )
+            ],
+            done=done,
+        )
+
+        with patch.object(self.app.state.jobs, "get_job", AsyncMock(return_value=job)):
+            response = self.client.get(
+                "/v1/videos/video_job-video-content",
+                headers={"Authorization": "Bearer secret-token"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(
+            payload["url"],
+            "http://testserver/v1/videos/video_job-video-content/content?api_key=secret-token",
+        )
+
+    def test_videos_content_accepts_query_api_key(self) -> None:
+        from comfyui2api.jobs import Job, JobOutput
+
+        done = asyncio.Event()
+        done.set()
+        job_id = "job-video-download"
+        out_dir = Path(os.environ["RUNS_DIR"]) / job_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / "clip.mp4"
+        out_path.write_bytes(b"fake-video")
+
+        job = Job(
+            job_id=job_id,
+            created_at_utc="2026-03-16T00:00:00Z",
+            created_at=123,
+            status="completed",
+            kind="txt2video",
+            workflow=self.txt2video_workflow_name,
+            requested_model=self.txt2video_workflow_name,
+            outputs=[
+                JobOutput(
+                    filename="clip.mp4",
+                    url=f"/runs/{job_id}/clip.mp4",
+                    media_type="video/mp4",
+                    node_id="2",
+                    output_key="images",
+                )
+            ],
+            done=done,
+        )
+
+        with patch.object(self.app.state.jobs, "get_job", AsyncMock(return_value=job)):
+            response = self.client.get(f"/v1/videos/video_{job_id}/content?api_key=secret-token")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"fake-video")
+        self.assertEqual(response.headers["content-type"], "video/mp4")
+
     def test_websocket_rejects_missing_auth(self) -> None:
         with self.assertRaises(WebSocketDisconnect) as ctx:
             with self.client.websocket_connect("/v1/jobs/missing-job/ws"):
