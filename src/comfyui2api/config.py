@@ -60,6 +60,9 @@ class Config:
     worker_concurrency: int
     enable_workflow_watch: bool
     comfyui_startup_check: bool
+    job_retention_seconds: int
+    max_jobs_in_memory: int
+    job_cleanup_interval_s: float
 
     default_txt2img_workflow: str
     default_img2img_workflow: str
@@ -78,6 +81,9 @@ def load_config() -> Config:
     ).expanduser()
 
     comfy_base_url = _env_str("COMFYUI_BASE_URL", "http://127.0.0.1:8188").rstrip("/")
+    job_cleanup_interval_s = _env_float("JOB_CLEANUP_INTERVAL_S", 60.0)
+    if job_cleanup_interval_s <= 0:
+        job_cleanup_interval_s = 60.0
 
     return Config(
         api_listen=_env_str("API_LISTEN", "0.0.0.0"),
@@ -98,6 +104,9 @@ def load_config() -> Config:
         worker_concurrency=max(1, _env_int("WORKER_CONCURRENCY", 1)),
         enable_workflow_watch=_env_bool("ENABLE_WORKFLOW_WATCH", True),
         comfyui_startup_check=_env_bool("COMFYUI_STARTUP_CHECK", True),
+        job_retention_seconds=max(0, _env_int("JOB_RETENTION_SECONDS", 604_800)),
+        max_jobs_in_memory=max(0, _env_int("MAX_JOBS_IN_MEMORY", 1000)),
+        job_cleanup_interval_s=job_cleanup_interval_s,
         default_txt2img_workflow=_env_str("DEFAULT_TXT2IMG_WORKFLOW", "文生图_z_image_turbo.json"),
         default_img2img_workflow=_env_str("DEFAULT_IMG2IMG_WORKFLOW", "图生图_flux2.json"),
         default_txt2video_workflow=_env_str("DEFAULT_TXT2VIDEO_WORKFLOW", ""),

@@ -35,6 +35,7 @@ from .comfy_workflow import (
     pick_unique_target,
 )
 from .config import Config, load_config
+from .job_retention import run_job_retention_forever
 from .jobs import JobManager
 from .util import (
     bearer_authorized,
@@ -287,10 +288,24 @@ def create_app() -> FastAPI:
         await registry.load_all()
         if cfg.enable_workflow_watch:
             app.state.workflow_watch_task = asyncio.create_task(registry.watch_forever(), name="workflow-watch")
+        if cfg.job_retention_seconds > 0 or cfg.max_jobs_in_memory > 0:
+            app.state.job_retention_task = asyncio.create_task(
+                run_job_retention_forever(
+                    jobs,
+                    interval_s=cfg.job_cleanup_interval_s,
+                    ttl_seconds=cfg.job_retention_seconds,
+                    max_jobs=cfg.max_jobs_in_memory,
+                ),
+                name="job-retention",
+            )
         await jobs.start_workers()
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
+        retention_task = getattr(app.state, "job_retention_task", None)
+        if retention_task:
+            retention_task.cancel()
+            await asyncio.gather(retention_task, return_exceptions=True)
         t = getattr(app.state, "workflow_watch_task", None)
         if t:
             t.cancel()
