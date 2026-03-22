@@ -725,6 +725,128 @@ def create_app() -> FastAPI:
                 return Path(raw_url).name
         return ""
 
+    def _extract_chat_message_content(content: Any) -> tuple[list[str], str | None]:
+        texts: list[str] = []
+        image_value: str | None = None
+        if isinstance(content, str):
+            cleaned = content.strip()
+            if cleaned:
+                texts.append(cleaned)
+            return texts, None
+        if not isinstance(content, list):
+            return texts, None
+
+        for part in content:
+            if isinstance(part, str):
+                cleaned = part.strip()
+                if cleaned:
+                    texts.append(cleaned)
+                continue
+            if not isinstance(part, dict):
+                continue
+
+            part_type = str(part.get("type") or "").strip().lower()
+            if part_type in {"text", "input_text"}:
+                raw_text = part.get("text")
+                if raw_text is None and part_type == "input_text":
+                    raw_text = part.get("input_text")
+                cleaned = str(raw_text or "").strip()
+                if cleaned:
+                    texts.append(cleaned)
+                continue
+
+            if image_value is not None:
+                continue
+            if part_type not in {"image_url", "input_image", "image"}:
+                continue
+
+            raw_image: Any = part.get("image_url")
+            if raw_image is None:
+                raw_image = part.get("input_image")
+            if raw_image is None:
+                raw_image = part.get("url")
+            if raw_image is None:
+                raw_image = part.get("image")
+            if isinstance(raw_image, dict):
+                raw_image = raw_image.get("url") or raw_image.get("image_url")
+            cleaned_image = str(raw_image or "").strip()
+            if cleaned_image:
+                image_value = cleaned_image
+
+        return texts, image_value
+
+    def _extract_chat_prompt_and_image(messages: Any) -> tuple[str, str | None]:
+        prompt = ""
+        image_value: str | None = None
+        if not isinstance(messages, list):
+            return prompt, image_value
+
+        for item in reversed(messages):
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "").strip().lower()
+            if role != "user":
+                continue
+            texts, maybe_image = _extract_chat_message_content(item.get("content"))
+            if not prompt and texts:
+                prompt = "\n\n".join(texts).strip()
+            if image_value is None and maybe_image:
+                image_value = maybe_image
+            if prompt and image_value is not None:
+                break
+
+        return prompt, image_value
+
+    def _pick_chat_generation_kind(*, wf: Any, has_image: bool) -> str:
+        detected_kind = str(getattr(getattr(wf, "capabilities", None), "kind", "") or "").strip().lower()
+        if has_image:
+            if detected_kind == "img2video" and _workflow_supports_kind(wf, "img2video"):
+                return "img2video"
+            if detected_kind == "img2img" and _workflow_supports_kind(wf, "img2img"):
+                return "img2img"
+            if _workflow_supports_kind(wf, "img2video") and not _workflow_supports_kind(wf, "img2img"):
+                return "img2video"
+            if _workflow_supports_kind(wf, "img2img") and not _workflow_supports_kind(wf, "img2video"):
+                return "img2img"
+            if _workflow_supports_kind(wf, "img2video"):
+                return "img2video"
+            if _workflow_supports_kind(wf, "img2img"):
+                return "img2img"
+            raise _openai_error(_workflow_kind_error_message(wf=wf, kind="img2video"), http_status=400)
+
+        if detected_kind == "txt2video" and _workflow_supports_kind(wf, "txt2video"):
+            return "txt2video"
+        if detected_kind == "txt2img" and _workflow_supports_kind(wf, "txt2img"):
+            return "txt2img"
+        if _workflow_supports_kind(wf, "txt2video") and not _workflow_supports_kind(wf, "txt2img"):
+            return "txt2video"
+        if _workflow_supports_kind(wf, "txt2img") and not _workflow_supports_kind(wf, "txt2video"):
+            return "txt2img"
+        if _workflow_supports_kind(wf, "txt2video"):
+            return "txt2video"
+        if _workflow_supports_kind(wf, "txt2img"):
+            return "txt2img"
+        raise _openai_error(_workflow_kind_error_message(wf=wf, kind="txt2img"), http_status=400)
+
+    def _chat_completion_response(*, model: str, content_payload: Mapping[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": f"chatcmpl_{_uuid_now_hex()}",
+            "object": "chat.completion",
+            "created": utc_now_unix(),
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": json.dumps(dict(content_payload), ensure_ascii=False),
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        }
+
     @app.get("/v1/models")
     async def openai_models(authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
         _require_auth(cfg, authorization)
@@ -740,6 +862,102 @@ def create_app() -> FastAPI:
                 }
             )
         return {"object": "list", "data": data}
+
+    @app.post("/v1/chat/completions")
+    async def openai_chat_completions(
+        request: Request,
+        body: Dict[str, Any],
+        authorization: Optional[str] = Header(default=None),
+        x_comfyui_async: Optional[str] = Header(default=None),
+    ) -> Dict[str, Any]:
+        _require_auth(cfg, authorization)
+        if body.get("stream") is True:
+            raise _openai_error("Streaming is not supported for /v1/chat/completions", http_status=400)
+
+        requested_model = str(body.get("model") or "").strip()
+        if not requested_model:
+            raise _openai_error("Missing 'model'")
+
+        wf = await _resolve_workflow_name(requested_model)
+        prompt = str(body.get("prompt") or "").strip()
+        image_value = _clean_optional_value(body.get("image"))
+        if image_value is not None:
+            image_value = str(image_value).strip()
+        if not prompt or not image_value:
+            message_prompt, message_image = _extract_chat_prompt_and_image(body.get("messages"))
+            if not prompt:
+                prompt = message_prompt
+            if not image_value and message_image:
+                image_value = message_image
+        if not prompt:
+            raise _openai_error("Missing prompt text in 'messages'")
+
+        kind = _pick_chat_generation_kind(wf=wf, has_image=bool(image_value))
+        negative_prompt = str(body.get("negative_prompt") or "").strip()
+        standard_params = _collect_standard_params({key: body.get(key) for key in STANDARD_PARAMETER_ORDER if key in body})
+        seconds_value = _clean_optional_value(body.get("seconds"))
+        if seconds_value is not None and "duration" not in standard_params:
+            standard_params["duration"] = seconds_value
+
+        image_rel = ""
+        if image_value:
+            image_rel = await _store_input_image_value(str(image_value), filename_hint="chat_input")
+
+        job = await jobs.create_job(
+            kind=kind,
+            workflow=wf.name,
+            requested_model=requested_model,
+            seconds=str(seconds_value or ""),
+            size=str(body.get("size") or "").strip(),
+            quality=str(body.get("quality") or "").strip() or "standard",
+            metadata="",
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            image=image_rel,
+            standard_params=standard_params,
+        )
+
+        public_model = requested_model or Path(wf.name).stem
+        if x_comfyui_async and str(x_comfyui_async).strip() not in {"0", "false", "False"}:
+            payload: dict[str, Any] = {
+                "type": "generation_job",
+                "kind": kind,
+                "job_id": job.job_id,
+                "status": "pending",
+            }
+            if kind.endswith("video"):
+                payload["video_id"] = _video_id(job.job_id)
+            return _chat_completion_response(model=public_model, content_payload=payload)
+
+        done = await _openai_wait(job.job_id)
+        outputs = [o for o in (done.get("outputs") or []) if isinstance(o, dict)]
+        response_format = str(body.get("response_format") or "url").strip()
+
+        payload = {
+            "type": "generation_result",
+            "kind": kind,
+            "job_id": str(done.get("job_id") or job.job_id),
+            "status": "completed",
+        }
+        if kind.endswith("video"):
+            payload["video_id"] = _video_id(str(done.get("job_id") or job.job_id))
+
+        if response_format == "b64_json" and kind in {"txt2img", "img2img"}:
+            filename = _first_output_filename(outputs)
+            if not filename:
+                raise _openai_error("No outputs produced", http_status=500)
+            p = Path(cfg.runs_dir) / job.job_id / filename
+            payload["data"] = [{"b64_json": base64.b64encode(p.read_bytes()).decode("ascii")}]
+        else:
+            urls = _response_output_urls(
+                request,
+                job_id=str(done.get("job_id") or job.job_id),
+                outputs=outputs,
+                authorization=authorization,
+            )
+            payload["data"] = [{"url": u} for u in urls]
+
+        return _chat_completion_response(model=public_model, content_payload=payload)
 
     async def _pick_default_workflow(kind: str) -> str:
         if kind == "txt2img":

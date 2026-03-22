@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib
 import json
 import os
@@ -121,11 +122,13 @@ class AppSmokeTests(unittest.TestCase):
         env = {
             "API_TOKEN": "secret-token",
             "COMFYUI_BASE_URL": "http://127.0.0.1:8188",
+            "COMFYUI_INPUT_DIR": str(root / "input"),
             "COMFYUI_STARTUP_CHECK": "0",
             "DEFAULT_TXT2IMG_WORKFLOW": workflow_name,
             "DEFAULT_IMG2IMG_WORKFLOW": workflow_name,
             "DEFAULT_IMG2VIDEO_WORKFLOW": workflow_name,
             "ENABLE_WORKFLOW_WATCH": "0",
+            "IMAGE_UPLOAD_MODE": "local",
             "MAX_BODY_BYTES": "1024",
             "RUNS_DIR": str(runs_dir),
             "WORKER_CONCURRENCY": "1",
@@ -188,6 +191,75 @@ class AppSmokeTests(unittest.TestCase):
         self.assertEqual(response.json()["status"], "pending")
         kwargs = mock_create_job.await_args.kwargs
         self.assertEqual(kwargs["workflow"], self.workflow_name)
+
+    def test_chat_completions_routes_text_prompt_to_txt2img(self) -> None:
+        mock_create_job = AsyncMock(
+            return_value=SimpleNamespace(job_id="job-chat-image", requested_model="test_txt2img", created_at=123)
+        )
+        with patch.object(self.app.state.jobs, "create_job", mock_create_job):
+            response = self.client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer secret-token", "x-comfyui-async": "true"},
+                json={
+                    "model": "test_txt2img",
+                    "messages": [{"role": "user", "content": "draw a cinematic cat"}],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["object"], "chat.completion")
+        self.assertEqual(payload["model"], "test_txt2img")
+        message = payload["choices"][0]["message"]
+        self.assertEqual(message["role"], "assistant")
+        content = json.loads(message["content"])
+        self.assertEqual(content["type"], "generation_job")
+        self.assertEqual(content["kind"], "txt2img")
+        self.assertEqual(content["status"], "pending")
+        self.assertEqual(content["job_id"], "job-chat-image")
+        kwargs = mock_create_job.await_args.kwargs
+        self.assertEqual(kwargs["kind"], "txt2img")
+        self.assertEqual(kwargs["workflow"], self.workflow_name)
+        self.assertEqual(kwargs["prompt"], "draw a cinematic cat")
+
+    def test_chat_completions_routes_multimodal_prompt_to_img2video(self) -> None:
+        image_url = "data:image/png;base64," + base64.b64encode(b"fake-image").decode("ascii")
+        mock_create_job = AsyncMock(
+            return_value=SimpleNamespace(job_id="job-chat-video", requested_model="test_hybrid_video", created_at=123)
+        )
+        with patch.object(self.app.state.jobs, "create_job", mock_create_job):
+            response = self.client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer secret-token", "x-comfyui-async": "true"},
+                json={
+                    "model": "test_hybrid_video",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "animate this frame"},
+                                {"type": "image_url", "image_url": {"url": image_url}},
+                            ],
+                        }
+                    ],
+                    "fps": 24,
+                    "seconds": 5,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        content = json.loads(payload["choices"][0]["message"]["content"])
+        self.assertEqual(content["kind"], "img2video")
+        self.assertEqual(content["status"], "pending")
+        self.assertEqual(content["video_id"], "video_job-chat-video")
+        kwargs = mock_create_job.await_args.kwargs
+        self.assertEqual(kwargs["kind"], "img2video")
+        self.assertEqual(kwargs["workflow"], self.hybrid_video_workflow_name)
+        self.assertEqual(kwargs["requested_model"], "test_hybrid_video")
+        self.assertEqual(kwargs["prompt"], "animate this frame")
+        self.assertTrue(kwargs["image"])
+        self.assertEqual(kwargs["standard_params"], {"fps": 24, "duration": 5})
 
     def test_workflow_parameters_endpoint_exposes_sidecar_mapping(self) -> None:
         response = self.client.get(
