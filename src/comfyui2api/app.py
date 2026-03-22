@@ -1469,7 +1469,7 @@ def create_app() -> FastAPI:
             "input_reference_value": input_reference_value,
         }
 
-    @app.post("/v1/videos", status_code=201)
+    @app.post("/v1/videos", status_code=200)
     async def openai_videos_create(
         request: Request,
         authorization: Optional[str] = Header(default=None),
@@ -1522,7 +1522,7 @@ def create_app() -> FastAPI:
             "object": "video",
             "model": job.requested_model or workflow,
             "created_at": job.created_at,
-            "status": "processing",
+            "status": "queued",
             "progress": 0,
         }
 
@@ -1538,13 +1538,15 @@ def create_app() -> FastAPI:
         if not job:
             raise _openai_error("Video not found", http_status=404)
 
-        status = "processing"
-        if job.status == "completed":
-            status = "succeeded"
+        status = "queued"
+        if job.status == "running":
+            status = "in_progress"
+        elif job.status == "completed":
+            status = "completed"
         elif job.status == "failed":
             status = "failed"
 
-        completed = status == "succeeded"
+        completed = status == "completed"
         progress = _progress_percent(job.progress or {}, completed=completed)
         if status == "failed":
             progress = 0

@@ -347,7 +347,8 @@ class AppSmokeTests(unittest.TestCase):
                 },
                 files={},
             )
-        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "queued")
         kwargs = mock_create_job.await_args.kwargs
         self.assertEqual(kwargs["standard_params"], {"duration": "5", "size": "1280x720", "fps": "24", "frames": "120"})
 
@@ -368,10 +369,11 @@ class AppSmokeTests(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["object"], "video")
         self.assertEqual(payload["model"], "test_txt2video")
+        self.assertEqual(payload["status"], "queued")
         kwargs = mock_create_job.await_args.kwargs
         self.assertEqual(kwargs["kind"], "txt2video")
         self.assertEqual(kwargs["workflow"], self.txt2video_workflow_name)
@@ -395,7 +397,8 @@ class AppSmokeTests(unittest.TestCase):
                 },
                 files={},
             )
-        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "queued")
         kwargs = mock_create_job.await_args.kwargs
         self.assertEqual(kwargs["workflow"], self.hybrid_video_workflow_name)
 
@@ -432,11 +435,37 @@ class AppSmokeTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
+        self.assertEqual(payload["status"], "completed")
         parsed = urlparse(payload["url"])
         params = parse_qs(parsed.query)
         self.assertEqual(parsed.path, "/v1/videos/video_job-video-content/content")
         self.assertIn("exp", params)
         self.assertIn("sig", params)
+
+    def test_videos_get_maps_running_status_to_in_progress(self) -> None:
+        from comfyui2api.jobs import Job
+
+        job = Job(
+            job_id="job-video-running",
+            created_at_utc="2026-03-16T00:00:00Z",
+            created_at=123,
+            status="running",
+            kind="txt2video",
+            workflow=self.txt2video_workflow_name,
+            requested_model=self.txt2video_workflow_name,
+        )
+
+        with patch.object(self.app.state.jobs, "get_job", AsyncMock(return_value=job)):
+            response = self.client.get(
+                "/v1/videos/video_job-video-running",
+                headers={"Authorization": "Bearer secret-token"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "in_progress")
+        self.assertEqual(payload["progress"], 0)
+        self.assertIsNone(payload["url"])
 
     def test_videos_content_accepts_query_api_key(self) -> None:
         from comfyui2api.jobs import Job, JobOutput
